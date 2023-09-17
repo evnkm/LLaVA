@@ -16,6 +16,9 @@ from transformers import TextStreamer
 
 
 class Args:
+    '''
+    Base hyperparams. Excludes input prompt and image.
+    '''
     model_path: str = "liuhaotian/LLaVA-Lightning-MPT-7B-preview"
     model_base: str = None
     num_gpus: int = 1
@@ -23,9 +26,9 @@ class Args:
     temperature: float = 0.2
     max_new_tokens: int = 512
     load_8bit: bool = False
-    load_4bit: bool = False
+    load_4bit: bool = True
     debug: bool = False
-    
+
 
 def load_image(image_file):
     if image_file.startswith('http') or image_file.startswith('https'):
@@ -36,12 +39,13 @@ def load_image(image_file):
     return image
 
 
-def main(image_filename):
+def main(image_filename, inp="Describe the image in 500 characters. Only include what you see and nothing else. Include information about the background, the time of day, relative positioning of objects, lighting, any text in the image, objects and people present, and the setting."):
     # Model
     disable_torch_init()
 
     model_name = get_model_name_from_path(Args.model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(Args.model_path, Args.model_base, model_name, Args.load_8bit, Args.load_4bit)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(Args.model_path, Args.model_base, model_name,
+                                                                           Args.load_8bit, Args.load_4bit)
 
     if 'llama-2' in model_name.lower():
         conv_mode = "llava_llama_2"
@@ -53,7 +57,10 @@ def main(image_filename):
         conv_mode = "llava_v0"
 
     if Args.conv_mode is not None and conv_mode != Args.conv_mode:
-        print('[WARNING] the auto inferred conversation mode is {}, while `--conv-mode` is {}, using {}'.format(conv_mode, Args.conv_mode, Args.conv_mode))
+        print(
+            '[WARNING] the auto inferred conversation mode is {}, while `--conv-mode` is {}, using {}'.format(conv_mode,
+                                                                                                              Args.conv_mode,
+                                                                                                              Args.conv_mode))
     else:
         Args.conv_mode = conv_mode
 
@@ -66,63 +73,61 @@ def main(image_filename):
     image = load_image(image_filename)
     image_tensor = image_processor.preprocess(image, return_tensors='pt')['pixel_values'].half().cuda()
 
-    while True:
-        try:
-            inp = input(f"{roles[0]}: ")
-        except EOFError:
-            inp = ""
-        if not inp:
-            print("exit...")
-            break
+    # while True:
+    #     try:
+    #         inp = input(f"{roles[0]}: ")
+    #     except EOFError:
+    #         inp = ""
+    #     if not inp:
+    #         print("exit...")
+    #         break
 
-        print(f"{roles[1]}: ", end="")
-        # Fixme: remove
-        print(Args.load_8bit, Args.load_4bit, Args.debug)
+    # PROMPT HERE
+    print(f"{roles[1]}: ", end="")
 
-        if image is not None:
-            # first message
-            if model.config.mm_use_im_start_end:
-                inp = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + inp
-            else:
-                inp = DEFAULT_IMAGE_TOKEN + '\n' + inp
-            conv.append_message(conv.roles[0], inp)
-            image = None
+    if image is not None:
+        # first message
+        if model.config.mm_use_im_start_end:
+            inp = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + inp
         else:
-            # later messages
-            conv.append_message(conv.roles[0], inp)
-        conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt()
+            inp = DEFAULT_IMAGE_TOKEN + '\n' + inp
+        conv.append_message(conv.roles[0], inp)
+        image = None
+    else:
+        # later messages
+        conv.append_message(conv.roles[0], inp)
+    conv.append_message(conv.roles[1], None)
+    prompt = conv.get_prompt()
 
-        # Fixme: remove
-        print("PROMPT: ", prompt)
+    input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
+    stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
+    keywords = [stop_str]
+    stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
+    streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
 
-        input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
-        stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
-        keywords = [stop_str]
-        stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
-        streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+    with torch.inference_mode():
+        output_ids = model.generate(
+            input_ids,
+            images=image_tensor,
+            do_sample=True,
+            temperature=0.2,
+            max_new_tokens=1024,
+            streamer=streamer,
+            use_cache=True,
+            stopping_criteria=[stopping_criteria])
 
-        with torch.inference_mode():
-            output_ids = model.generate(
-                input_ids,
-                images=image_tensor,
-                do_sample=True,
-                temperature=0.2,
-                max_new_tokens=1024,
-                streamer=streamer,
-                use_cache=True,
-                stopping_criteria=[stopping_criteria])
+    outputs = tokenizer.decode(output_ids[0, input_ids.shape[1]:]).strip()
+    conv.messages[-1][-1] = outputs
 
-        outputs = tokenizer.decode(output_ids[0, input_ids.shape[1]:]).strip()
-        conv.messages[-1][-1] = outputs
+    # print("FINALLY: ", conv)
+    # print("CONV_MSGS: ", conv.messages)
+    # print("CONV_MSGS: ", conv.messages[-1][-1])
+    # print("CONV_MSGS: ", conv.messages[-1][-1][:-10]) # TODO: USE THIS FOR OUTPUT
 
-        # print("FINALLY: ", conv)
-        # print("CONV_MSGS: ", conv.messages)
-        # print("CONV_MSGS: ", conv.messages[-1][-1])
-        # print("CONV_MSGS: ", conv.messages[-1][-1][:-10]) # TODO: USE THIS FOR OUTPUT
+    # if Args.debug:
+    #     print("\n", {"prompt": prompt, "outputs": outputs}, "\n")
 
-        if Args.debug:
-            print("\n", {"prompt": prompt, "outputs": outputs}, "\n")
+    return conv.messages[-1][-1][:-10]
 
 
 if __name__ == "__main__":
@@ -131,5 +136,13 @@ if __name__ == "__main__":
     #     --image-file "https://llava-vl.github.io/static/images/view.jpg" \
 
     # prompt: Describe the image in 500 characters. Only include what you see and nothing else. Include information about the background, the time of day, relative positioning of objects, lighting, any text in the image, objects and people present, and the setting.
-    image_filename = "https://llava-vl.github.io/static/images/view.jpg"
-    main()
+    import os
+    import json
+
+    images = ['./images/' + name for name in os.listdir('./images')]
+
+    caption_dict = {filename: main(filename) for filename in images}
+    print(caption_dict)
+    with open("first_dataset.json", "w") as json_file:
+        json.dump(caption_dict, json_file, indent=4)
+
