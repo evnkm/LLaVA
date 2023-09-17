@@ -139,10 +139,10 @@ if __name__ == "__main__":
     import os
     import json
 
-    images = ['./images/' + name for name in os.listdir('./images')]
+    images = ['./images2/' + name for name in os.listdir('./images2')]
 
     caption_dict = {filename: main(filename) for filename in images}
     print(caption_dict)
-    with open("first_dataset.json", "w") as json_file:
+    with open("third_dataset.json", "w") as json_file:
         json.dump(caption_dict, json_file, indent=4)
 

@@ -27,3 +27,4 @@ ckpts*
 
 .ipynb_checkpoints
 *.ipynb
+llava/serve/images*
