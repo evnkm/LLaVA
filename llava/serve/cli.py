@@ -15,6 +15,18 @@ from io import BytesIO
 from transformers import TextStreamer
 
 
+class Args:
+    model_path: str = "liuhaotian/LLaVA-Lightning-MPT-7B-preview"
+    model_base: str = None
+    num_gpus: int = 1
+    conv_mode: str = None
+    temperature: float = 0.2
+    max_new_tokens: int = 512
+    load_8bit: bool = False
+    load_4bit: bool = False
+    debug: bool = False
+    
+
 def load_image(image_file):
     if image_file.startswith('http') or image_file.startswith('https'):
         response = requests.get(image_file)
@@ -24,12 +36,12 @@ def load_image(image_file):
     return image
 
 
-def main(args):
+def main(image_filename):
     # Model
     disable_torch_init()
 
-    model_name = get_model_name_from_path(args.model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(args.model_path, args.model_base, model_name, args.load_8bit, args.load_4bit)
+    model_name = get_model_name_from_path(Args.model_path)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(Args.model_path, Args.model_base, model_name, Args.load_8bit, Args.load_4bit)
 
     if 'llama-2' in model_name.lower():
         conv_mode = "llava_llama_2"
@@ -40,18 +52,18 @@ def main(args):
     else:
         conv_mode = "llava_v0"
 
-    if args.conv_mode is not None and conv_mode != args.conv_mode:
-        print('[WARNING] the auto inferred conversation mode is {}, while `--conv-mode` is {}, using {}'.format(conv_mode, args.conv_mode, args.conv_mode))
+    if Args.conv_mode is not None and conv_mode != Args.conv_mode:
+        print('[WARNING] the auto inferred conversation mode is {}, while `--conv-mode` is {}, using {}'.format(conv_mode, Args.conv_mode, Args.conv_mode))
     else:
-        args.conv_mode = conv_mode
+        Args.conv_mode = conv_mode
 
-    conv = conv_templates[args.conv_mode].copy()
+    conv = conv_templates[Args.conv_mode].copy()
     if "mpt" in model_name.lower():
         roles = ('user', 'assistant')
     else:
         roles = conv.roles
 
-    image = load_image(args.image_file)
+    image = load_image(image_filename)
     image_tensor = image_processor.preprocess(image, return_tensors='pt')['pixel_values'].half().cuda()
 
     while True:
@@ -64,6 +76,8 @@ def main(args):
             break
 
         print(f"{roles[1]}: ", end="")
+        # Fixme: remove
+        print(Args.load_8bit, Args.load_4bit, Args.debug)
 
         if image is not None:
             # first message
@@ -78,6 +92,9 @@ def main(args):
             conv.append_message(conv.roles[0], inp)
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
+
+        # Fixme: remove
+        print("PROMPT: ", prompt)
 
         input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
         stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
@@ -99,21 +116,20 @@ def main(args):
         outputs = tokenizer.decode(output_ids[0, input_ids.shape[1]:]).strip()
         conv.messages[-1][-1] = outputs
 
-        if args.debug:
+        # print("FINALLY: ", conv)
+        # print("CONV_MSGS: ", conv.messages)
+        # print("CONV_MSGS: ", conv.messages[-1][-1])
+        # print("CONV_MSGS: ", conv.messages[-1][-1][:-10]) # TODO: USE THIS FOR OUTPUT
+
+        if Args.debug:
             print("\n", {"prompt": prompt, "outputs": outputs}, "\n")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", type=str, default="facebook/opt-350m")
-    parser.add_argument("--model-base", type=str, default=None)
-    parser.add_argument("--image-file", type=str, required=True)
-    parser.add_argument("--num-gpus", type=int, default=1)
-    parser.add_argument("--conv-mode", type=str, default=None)
-    parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--max-new-tokens", type=int, default=512)
-    parser.add_argument("--load-8bit", action="store_true")
-    parser.add_argument("--load-4bit", action="store_true")
-    parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
-    main(args)
+    # python -m llava.serve.cli \
+    #     --model-path liuhaotian/LLaVA-Lightning-MPT-7B-preview \
+    #     --image-file "https://llava-vl.github.io/static/images/view.jpg" \
+
+    # prompt: Describe the image in 500 characters. Only include what you see and nothing else. Include information about the background, the time of day, relative positioning of objects, lighting, any text in the image, objects and people present, and the setting.
+    image_filename = "https://llava-vl.github.io/static/images/view.jpg"
+    main()
